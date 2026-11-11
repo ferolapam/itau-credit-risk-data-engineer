@@ -1,0 +1,19 @@
+# --- Dados do case: nao versionar (tamanho + confidencialidade) ---
+data/
+*.zip
+
+# --- Ambiente virtual Python ---
+.venv/
+venv/
+
+# --- Arquivos gerados pelo Python ---
+__pycache__/
+*.pyc
+
+# --- Arquivos gerados pelo Spark ---
+spark-warehouse/
+metastore_db/
+derby.log
+
+# --- Segredos e configuracoes locais ---
+.env
