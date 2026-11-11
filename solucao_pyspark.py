@@ -172,6 +172,60 @@ def build_orders_quality(orders_df: DataFrame, clients_df: DataFrame) -> DataFra
     )
 
 
+def build_order_issues(orders_quality_df: DataFrame) -> DataFrame:
+    """
+    Seção 1.1: converte a visão tratada (uma linha por pedido, com flags) para o
+    formato pedido pelo enunciado (uma linha por problema encontrado).
+
+    As regras de qualidade ficam apenas em build_orders_quality: esta função só lê
+    as flags, garantindo que as duas saídas nunca divirjam.
+    """
+    # Cada regra associa uma flag ao tipo de problema e à sua descrição.
+    # As descrições usam value_raw (o dado como chegou da origem), pois é esse o
+    # valor que precisa ser localizado e corrigido no sistema de origem.
+    issue_rules = [
+        ("dq_missing_id", "missing_value", F.lit("Campo id está nulo")),
+        ("dq_missing_client_id", "missing_value", F.lit("Campo client_id está nulo")),
+        ("dq_missing_value", "missing_value", F.lit("Campo value está nulo")),
+        # Bônus: valor presente, mas não numérico (ex.: "N/A").
+        ("dq_invalid_format", "invalid_format",
+         F.format_string("Valor '%s' não é numérico", "value_raw")),
+        ("dq_invalid_range", "invalid_range",
+         F.format_string("Valor %s fora do range permitido", "value_raw")),
+        ("dq_client_not_found", "invalid_client",
+         F.format_string("client_id %s não existe", "client_id")),
+        # Bônus: o mesmo id é usado por pedidos diferentes. A descrição inclui
+        # client_id e value para que cada linha aponte para um pedido específico.
+        ("dq_duplicated_id", "duplicated_id",
+         F.format_string(
+             "Id repetido em outro pedido (client_id %s, value %s)",
+             "client_id",
+             F.coalesce(F.col("value_raw"), F.lit("nulo")),
+         )),
+    ]
+
+    # Garante que toda flag de qualidade tenha uma regra de saída correspondente.
+    assert [flag for flag, _, _ in issue_rules] == DQ_COLUMNS, "Flag sem regra de saída"
+
+    issues_by_rule = [
+        orders_quality_df
+        .filter(F.col(flag))
+        .select(
+            F.col("id").alias("pedido_id"),
+            F.lit(issue_type).alias("issue_type"),
+            description.alias("issue_description"),
+        )
+        for flag, issue_type, description in issue_rules
+    ]
+
+    # Ordena por pedido_id (exigido) e, em seguida, por tipo e descrição, para que
+    # a saída seja sempre a mesma em qualquer execução.
+    return (
+        reduce(DataFrame.unionByName, issues_by_rule)
+        .orderBy("pedido_id", "issue_type", "issue_description")
+    )
+
+
 def main() -> None:
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("ERROR")
@@ -183,30 +237,29 @@ def main() -> None:
     # evita reprocessar a leitura, o join e a janela a cada uso.
     orders_quality_df.cache()
 
-    # Conferência: o left join com clientes não pode duplicar nem perder pedidos.
-    print(f"Pedidos lidos: {orders_df.count()} | Pedidos na visão tratada: {orders_quality_df.count()}")
-
-    # Conferência: se todo registro tem um hash único, não existem cópias exatas;
-    # os ids duplicados são, portanto, pedidos diferentes compartilhando o mesmo id.
+    print("=" * 80)
+    print("CONFERÊNCIAS DE INTEGRIDADE")
+    print("=" * 80)
+    total_orders = orders_df.count()
+    total_quality = orders_quality_df.count()
+    # O left join com clientes não pode duplicar nem perder pedidos.
+    print(f"Pedidos lidos: {total_orders} | Pedidos na visão tratada: {total_quality}")
+    # Se todo registro tem um hash único, não existem cópias exatas: os ids
+    # duplicados são pedidos diferentes compartilhando o mesmo id.
     distinct_hashes = orders_quality_df.select("_record_hash").distinct().count()
-    print(f"Hashes distintos: {distinct_hashes} de {orders_quality_df.count()} registros")
-
-    print("Quantidade de pedidos por flag de qualidade:")
-    orders_quality_df.select(
-        [F.sum(F.col(c).cast("int")).alias(c) for c in DQ_COLUMNS]
-    ).show(vertical=True)
-
+    print(f"Hashes distintos: {distinct_hashes} de {total_quality} registros")
     print("Pedidos válidos x inválidos:")
-    orders_quality_df.groupBy("is_valid").count().show()
+    orders_quality_df.groupBy("is_valid").count().orderBy("is_valid").show()
 
-    print("Exemplos de pedidos com problema:")
-    (
-        orders_quality_df
-        .filter(~F.col("is_valid"))
-        .select("id", "client_id", "client_name", "value_raw", "value", *DQ_COLUMNS, "is_valid")
-        .orderBy("id")
-        .show(10, truncate=False)
-    )
+    print("=" * 80)
+    print("SEÇÃO 1.1 - VALIDAÇÃO DE QUALIDADE DE DADOS")
+    print("=" * 80)
+    order_issues_df = build_order_issues(orders_quality_df)
+    order_issues_df.show(20, truncate=False)
+
+    print(f"Total de problemas encontrados: {order_issues_df.count()}")
+    print("Problemas por tipo:")
+    order_issues_df.groupBy("issue_type").count().orderBy(F.desc("count")).show(truncate=False)
 
     print("Rastreabilidade de pedidos que compartilham o mesmo id:")
     (
