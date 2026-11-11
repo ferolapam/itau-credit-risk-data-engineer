@@ -32,6 +32,10 @@ VALUE_MAX_INCLUSIVE = Decimal("99.99")
 # Formato exigido pela Seção 1.2 para o total de compras por cliente.
 TOTAL_VALUE_TYPE = DecimalType(11, 2)
 
+# Limites da Seção 1.3: Low (< 20.00), Medium (>= 20.00 e < 50.00), High (>= 50.00).
+CATEGORY_MEDIUM_MIN = Decimal("20.00")
+CATEGORY_HIGH_MIN = Decimal("50.00")
+
 # Fator da regra de Tukey (Q3 + fator x IQR) para sinalizar clientes com volume de
 # pedidos fora do padrão. O fator 3 identifica apenas valores extremos ("far out").
 OUTLIER_IQR_FACTOR = 3
@@ -287,13 +291,53 @@ def build_client_report(orders_quality_df: DataFrame) -> tuple[DataFrame, float]
     return report_df, volume_threshold
 
 
+def add_value_category(orders_quality_df: DataFrame) -> DataFrame:
+    """
+    Seção 1.3: adiciona value_category à visão tratada, aplicando a regra do enunciado
+    a todo pedido com valor numérico. Pedidos sem valor numérico ficam sem categoria.
+
+    A regra é aplicada literalmente: valores negativos caem em "Low" e valores acima
+    de 99.99 caem em "High". Esses pedidos continuam identificáveis pela flag
+    dq_invalid_range, que fica ao lado da categoria na visão tratada.
+    """
+    value = F.col("value")
+    # As faixas são mutuamente exclusivas, então o encadeamento de when() é seguro:
+    # cada pedido pertence a exatamente uma categoria.
+    return orders_quality_df.withColumn(
+        "value_category",
+        F.when(value.isNull(), F.lit(None).cast("string"))
+        .when(value < CATEGORY_MEDIUM_MIN, F.lit("Low"))
+        .when(value < CATEGORY_HIGH_MIN, F.lit("Medium"))
+        .otherwise(F.lit("High")),
+    )
+
+
+def build_value_category_sample(orders_quality_df: DataFrame) -> DataFrame:
+    """
+    Seção 1.3: amostra de pedidos categorizados, ordenada por value decrescente.
+
+    Usa a mesma composição da Seção 1.2 (valor numérico até 99.99). Sem esse critério,
+    os 20 primeiros registros seriam exatamente os 20 valores acima do limite
+    (ex.: 4874.84), e a amostra não representaria pedidos reais. Esses registros
+    seguem na visão tratada, categorizados e sinalizados com dq_invalid_range.
+    """
+    return (
+        orders_quality_df
+        .filter(F.col("value").isNotNull() & (F.col("value") <= VALUE_MAX_INCLUSIVE))
+        # Desempate por id e pelo hash do registro: há vários pedidos com o mesmo
+        # valor (e ids repetidos), e a amostra precisa ser a mesma em toda execução.
+        .orderBy(F.desc("value"), F.asc("id"), F.asc("_record_hash"))
+        .select("id", "value", "value_category")
+    )
+
+
 def main() -> None:
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("ERROR")
 
     clients_df, orders_df = load_data(spark)
 
-    orders_quality_df = build_orders_quality(orders_df, clients_df)
+    orders_quality_df = add_value_category(build_orders_quality(orders_df, clients_df))
     # A visão tratada é reutilizada em várias consultas: mantê-la em memória
     # evita reprocessar a leitura, o join e a janela a cada uso.
     orders_quality_df.cache()
@@ -337,6 +381,22 @@ def main() -> None:
     client_report_df, volume_threshold = build_client_report(orders_quality_df)
     print(f"Limite de volume de pedidos por cliente (Q3 + {OUTLIER_IQR_FACTOR} x IQR): {volume_threshold}")
     client_report_df.show(20, truncate=False)
+
+    print("=" * 80)
+    print("SEÇÃO 1.3 - TRANSFORMAÇÃO CONDICIONAL (CATEGORIA DE VALOR)")
+    print("=" * 80)
+    build_value_category_sample(orders_quality_df).show(20, truncate=False)
+
+    # Transparência da regra literal: mostra quantos pedidos de cada categoria
+    # estão fora da faixa válida (negativos em Low, acima de 99.99 em High).
+    print("Distribuição das categorias na visão tratada:")
+    (
+        orders_quality_df
+        .groupBy("value_category", "dq_invalid_range")
+        .count()
+        .orderBy("value_category", "dq_invalid_range")
+        .show(truncate=False)
+    )
 
     spark.stop()
 
