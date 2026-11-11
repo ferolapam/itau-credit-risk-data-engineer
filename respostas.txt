@@ -1,0 +1,263 @@
+================================================================================
+CASE - ENGENHEIRO DE DADOS JÚNIOR
+Respostas das Seções 3 (Git Fundamentals) e 4 (Code Review)
+================================================================================
+
+
+================================================================================
+SEÇÃO 3 - GIT FUNDAMENTALS
+================================================================================
+
+--------------------------------------------------------------------------------
+3.1 Workflow Básico
+--------------------------------------------------------------------------------
+
+Premissa: o repositório já está clonado e a branch atual é feature/data-quality
+(conferível com "git branch --show-current").
+
+# 1. Verificar o status dos arquivos modificados
+git status
+
+# 2. Adicionar apenas o arquivo data_quality.py ao staging
+git add src/data_quality.py
+
+# 3. Fazer o commit com a mensagem solicitada
+git commit -m "Add data quality validation for orders"
+
+# 4. Enviar as mudanças para o repositório remoto na branch feature/data-quality
+git push origin feature/data-quality
+
+Observações:
+- O "git add" recebe o caminho do arquivo, em vez de "git add .", para garantir
+  que apenas a alteração revisada entre no commit. Arquivos não intencionais
+  (dados, credenciais, arquivos temporários) ficam de fora.
+- Antes do commit, "git status" (ou "git diff --staged") confirma que só o
+  data_quality.py está no staging.
+- Se for o primeiro envio da branch, uso "git push -u origin feature/data-quality".
+  O -u liga a branch local à remota, e os próximos envios podem ser feitos só
+  com "git push".
+
+
+--------------------------------------------------------------------------------
+3.2 Branching Básico
+--------------------------------------------------------------------------------
+
+# 1. Criar uma nova branch chamada feature/add-aggregation
+git branch feature/add-aggregation
+
+# 2. Trocar para essa branch
+git switch feature/add-aggregation
+
+# 3. Verificar em qual branch estou atualmente
+git branch --show-current
+
+# 4. Listar todas as branches locais
+git branch
+
+Observações:
+- Os passos 1 e 2 podem ser feitos em um único comando:
+  git switch -c feature/add-aggregation
+  (equivalente ao antigo "git checkout -b feature/add-aggregation").
+- Antes de criar a branch, atualizo a main ("git switch main" e "git pull"),
+  para que a nova feature parta da versão mais recente do código.
+
+
+--------------------------------------------------------------------------------
+3.3 Conceitos
+--------------------------------------------------------------------------------
+
+a) O que é um merge conflict e quando ele ocorre?
+
+Um merge conflict acontece quando o Git tenta juntar duas branches que alteraram
+as mesmas linhas de um arquivo de formas diferentes (ou quando uma branch altera
+um arquivo que a outra apagou), e ele não consegue decidir sozinho qual versão
+manter. O Git marca os trechos em conflito no arquivo, e a pessoa precisa
+escolher o conteúdo correto, testar e concluir o merge com um novo commit.
+Trabalhar em branches curtas e atualizar a branch com a main com frequência
+reduz a chance de conflitos.
+
+b) Qual a diferença entre git pull e git fetch?
+
+O git fetch apenas baixa do repositório remoto os commits e branches novos e
+atualiza as referências remotas (como origin/main), sem alterar a branch atual
+nem os arquivos locais. O git pull faz o fetch e, em seguida, integra essas
+mudanças na branch atual (por merge ou rebase), alterando os arquivos. O fetch
+é útil para inspecionar o que mudou antes de integrar, por exemplo com
+"git log --oneline main..origin/main".
+
+c) Por que é importante escrever mensagens de commit claras e descritivas?
+
+O histórico de commits é a documentação de como e por que o código mudou: uma
+mensagem clara permite entender a intenção de uma alteração meses depois, sem
+precisar ler todo o código. Isso facilita a revisão de código, a investigação
+de problemas (por exemplo, com git log e git blame) e a reversão segura de uma
+mudança específica. Em ambientes regulados, como o financeiro, o histórico
+também serve como trilha de auditoria: registra o que mudou, quando, por quem
+e por qual motivo.
+
+
+================================================================================
+SEÇÃO 4 - CODE REVIEW
+================================================================================
+
+--------------------------------------------------------------------------------
+4.1 Erros de Sintaxe e Lógica (dados de sensores IoT)
+--------------------------------------------------------------------------------
+
+Erro 1 - Condição do join usa "=" em vez de "=="
+    Trecho:   sensors_df.sensor_id = readings_df.sensor_id
+    Problema: "=" é atribuição em Python; dentro da chamada de função isso gera
+              SyntaxError e o script nem começa a executar.
+    Correção: usar comparação: sensors_df.sensor_id == readings_df.sensor_id,
+              ou, como a coluna tem o mesmo nome nos dois lados, on="sensor_id".
+
+Erro 2 - Coluna "sensor_id" ambígua após o join
+    Trecho:   result.groupBy("sensor_id")
+    Problema: com a condição sensors_df.sensor_id == readings_df.sensor_id, o
+              resultado do join mantém as duas colunas sensor_id. O groupBy por
+              nome não sabe qual usar e gera AnalysisException (referência
+              ambígua).
+    Correção: fazer o join com on="sensor_id", que mantém uma única coluna, ou
+              remover uma delas com .drop(readings_df.sensor_id).
+
+Erro 3 - "avg_temp" usado como variável Python no filtro
+    Trecho:   stats_per_sensor.filter(avg_temp > 80)
+    Problema: avg_temp é o nome de uma coluna do DataFrame, não uma variável
+              Python. A expressão gera NameError.
+    Correção: referenciar a coluna: .filter(F.col("avg_temp") > 80).
+
+Erro 4 - Import que sobrescreve a função nativa max do Python
+    Trecho:   from pyspark.sql.functions import avg, max
+    Problema: o max do Spark substitui o max nativo do Python em todo o módulo.
+              O código executa, mas qualquer uso posterior de max() com valores
+              Python passa a chamar a função do Spark e falha ou se comporta de
+              forma inesperada. É um erro silencioso e difícil de rastrear.
+    Correção: importar o módulo com alias (from pyspark.sql import functions as F)
+              e usar F.avg e F.max.
+
+Observações adicionais (boas práticas):
+- Os caminhos e o limite de temperatura (80) estão fixos no código; o ideal é
+  defini-los como constantes nomeadas.
+- Faltou encerrar a sessão com spark.stop().
+- A leitura sem schema explícito depende da inferência de tipos: se algum
+  registro trouxer "temperature" como texto, a coluna inteira pode ser lida
+  como string, e a média e o máximo deixam de ser numéricos.
+
+Versão corrigida:
+
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+
+SENSORS_PATH = "data/sensors.json"
+READINGS_PATH = "data/sensor_readings.json"
+HOT_SENSOR_THRESHOLD = 80
+
+spark = SparkSession.builder.appName("iot_analysis").getOrCreate()
+
+# Ler dados de sensores
+sensors_df = spark.read.json(SENSORS_PATH)
+readings_df = spark.read.json(READINGS_PATH)
+
+# Join sensores com leituras (on="sensor_id" mantém uma única coluna sensor_id)
+result = sensors_df.join(readings_df, on="sensor_id", how="inner")
+
+# Calcular estatísticas por sensor
+stats_per_sensor = (
+    result.groupBy("sensor_id")
+    .agg(
+        F.avg("temperature").alias("avg_temp"),
+        F.max("temperature").alias("max_temp"),
+    )
+)
+
+# Filtrar sensores com temperatura média alta
+hot_sensors = stats_per_sensor.filter(F.col("avg_temp") > HOT_SENSOR_THRESHOLD)
+hot_sensors.show()
+
+spark.stop()
+
+
+--------------------------------------------------------------------------------
+4.2 Bug de Lógica (logs da aplicação)
+--------------------------------------------------------------------------------
+
+a) O código está sintaticamente correto? Ele vai executar sem erros?
+
+Sim. A sintaxe está correta e o código executa sem erros, considerando que a
+variável spark já existe (a sessão não é criada no trecho). Após o join, as
+colunas id, username e login_count existem e não são ambíguas (a chave do lado
+dos logs se chama user_id). Ou seja, o código roda e entrega um resultado,
+mas o resultado está errado, o que torna o bug mais perigoso.
+
+b) O código implementa corretamente o objetivo descrito? Se não, qual é o
+   problema lógico?
+
+Não. O objetivo é encontrar usuários com MAIS de 10 logins, sem incluir
+exatamente 10, mas o filtro usa "login_count >= 10", que inclui quem tem
+exatamente 10. O correto é "> 10".
+
+Há também um ponto a confirmar: o count("*") conta todos os registros de log
+do usuário. Se o arquivo application_logs contiver outros eventos além de login
+(erros, acessos a páginas etc.), a contagem não representa logins. Nesse caso,
+é preciso filtrar o tipo de evento antes de agrupar. Na versão corrigida,
+assumi a existência de uma coluna event_type com o valor "login"; o nome real
+deve ser confirmado no schema do arquivo.
+
+c) Há alguma violação de boas práticas? O que você melhoraria?
+
+- O comentário diz "MAIS de 10", mas o código faz ">= 10": comentário e código
+  divergentes. O limite 10 deveria ser uma constante nomeada, o que deixa a
+  regra explícita em um único lugar.
+- O filtro como texto ("login_count >= 10") não é verificado até a execução.
+  Com F.col("login_count") > ..., erros de nome de coluna aparecem mais cedo
+  e a expressão fica consistente com o restante do código.
+- Importar funções soltas (from pyspark.sql.functions import col, count) pode
+  sobrescrever nomes do Python e de outras bibliotecas; o padrão é importar
+  com alias (functions as F).
+- O tipo de join não está explícito. O padrão é inner, mas declarar how="inner"
+  deixa claro que usuários sem cadastro em users_df serão descartados.
+- O join usa colunas com nomes diferentes (user_id e id). Renomear a chave
+  antes do join evita colunas redundantes no resultado e ambiguidade futura.
+- Se users_df tiver ids duplicados, o join multiplica as linhas. Vale conferir
+  a unicidade da chave antes do join.
+- Faltou ordenação no resultado, o que deixa a saída não determinística.
+
+d) Versão corrigida:
+
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+
+LOGS_PATH = "data/application_logs.parquet"
+USERS_PATH = "data/users.json"
+MIN_LOGINS_EXCLUSIVE = 10  # objetivo: MAIS de 10 logins (10 não entra)
+
+spark = SparkSession.builder.appName("frequent_users").getOrCreate()
+
+# Ler dados de logs
+logs_df = spark.read.parquet(LOGS_PATH)
+
+# Contar apenas eventos de login por usuário
+# (event_type é uma premissa: confirmar o nome da coluna no schema real)
+logins_per_user = (
+    logs_df
+    .filter(F.col("event_type") == "login")
+    .groupBy("user_id")
+    .agg(F.count("*").alias("login_count"))
+)
+
+# Filtrar usuários com MAIS de 10 logins
+frequent_users = logins_per_user.filter(F.col("login_count") > MIN_LOGINS_EXCLUSIVE)
+
+# Join com informações dos usuários
+users_df = spark.read.json(USERS_PATH).withColumnRenamed("id", "user_id")
+
+result = frequent_users.join(users_df, on="user_id", how="inner")
+
+(
+    result
+    .select(F.col("user_id").alias("id"), "username", "login_count")
+    .orderBy(F.desc("login_count"), F.asc("id"))
+    .show()
+)
+
+spark.stop()
