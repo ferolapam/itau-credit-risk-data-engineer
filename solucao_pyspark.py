@@ -36,6 +36,20 @@ TOTAL_VALUE_TYPE = DecimalType(11, 2)
 CATEGORY_MEDIUM_MIN = Decimal("20.00")
 CATEGORY_HIGH_MIN = Decimal("50.00")
 
+# Composição usada em todas as agregações (Seções 1.2, 1.3 e 2): pedido com valor
+# numérico que não ultrapassa o limite superior. Definida uma única vez para que o
+# PySpark e o SQL apliquem exatamente o mesmo critério.
+VALID_AMOUNT_SQL = f"p.value IS NOT NULL AND p.value <= {VALUE_MAX_INCLUSIVE}"
+
+# Tratamento de nomes para comparações de texto (Seção 2.3): remove acentos,
+# espaços nas pontas e diferenças de maiúsculas/minúsculas. Sem isso, um cliente
+# "Álvaro" ou " ana silva" não seria encontrado pelos filtros de nome.
+ACCENTED_CHARS = "ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇáàâãäéèêëíìîïóòôõöúùûüç"
+UNACCENTED_CHARS = "AAAAAEEEEIIIIOOOOOUUUUCaaaaaeeeeiiiiooooouuuuc"
+
+# Filtro de nome da Seção 2.3, aplicado sobre o nome tratado.
+NAME_FILTER_SQL = "(c.name_treated LIKE 'A%' OR c.name_treated LIKE '%SILVA')"
+
 # Fator da regra de Tukey (Q3 + fator x IQR) para sinalizar clientes com volume de
 # pedidos fora do padrão. O fator 3 identifica apenas valores extremos ("far out").
 OUTLIER_IQR_FACTOR = 3
@@ -331,6 +345,119 @@ def build_value_category_sample(orders_quality_df: DataFrame) -> DataFrame:
     )
 
 
+def register_sql_views(clients_df: DataFrame, orders_quality_df: DataFrame) -> None:
+    """
+    Seção 2: registra as views temporárias consultadas pelo Spark SQL.
+    - clientes: cadastro de clientes, com o nome original (name), o nome tratado
+      (name_treated) usado nas comparações de texto e a flag dq_name_treated, que
+      indica se o tratamento alterou o nome além de maiúsculas/minúsculas
+      (acento removido ou espaço nas pontas);
+    - pedidos_tratados: visão tratada de pedidos (valor original, valor tratado,
+      flags de qualidade, categoria e linhagem).
+    """
+    (
+        clients_df
+        .withColumn(
+            "name_treated",
+            F.upper(F.trim(F.translate(F.col("name"), ACCENTED_CHARS, UNACCENTED_CHARS))),
+        )
+        # Compara com o nome original em maiúsculas: a flag só é acionada quando o
+        # tratamento muda o conteúdo do nome, e não apenas a caixa das letras.
+        .withColumn(
+            "dq_name_treated",
+            F.coalesce(F.upper(F.col("name")) != F.col("name_treated"), F.lit(False)),
+        )
+        .createOrReplaceTempView("clientes")
+    )
+    orders_quality_df.createOrReplaceTempView("pedidos_tratados")
+
+
+# Seção 2.1: clientes com mais de 50 pedidos.
+# order_count segue a mesma composição de total_orders da Seção 1.2;
+# order_count_raw mostra todos os pedidos do cliente, sem filtro.
+SQL_CLIENTS_OVER_50_ORDERS = f"""
+    SELECT
+        c.id                                              AS client_id,
+        c.name                                            AS name,
+        COUNT(CASE WHEN {VALID_AMOUNT_SQL} THEN 1 END)    AS order_count,
+        COUNT(*)                                          AS order_count_raw
+    FROM pedidos_tratados AS p
+    INNER JOIN clientes AS c
+        ON c.id = p.client_id
+    GROUP BY c.id, c.name
+    HAVING COUNT(CASE WHEN {VALID_AMOUNT_SQL} THEN 1 END) > 50
+    ORDER BY order_count DESC, client_id ASC
+"""
+
+# Seção 2.2: top 10 clientes por valor total de compras.
+# Deve coincidir com os 10 primeiros da Seção 1.2 (mesma regra, outra API).
+SQL_TOP_10_CLIENTS_BY_VALUE = f"""
+    SELECT
+        c.id                                  AS client_id,
+        c.name                                AS name,
+        CAST(SUM(p.value) AS DECIMAL(11, 2))  AS total_value
+    FROM pedidos_tratados AS p
+    INNER JOIN clientes AS c
+        ON c.id = p.client_id
+    WHERE {VALID_AMOUNT_SQL}
+    GROUP BY c.id, c.name
+    ORDER BY total_value DESC, client_id ASC
+    LIMIT 10
+"""
+
+# Seção 2.3: pedidos acima de 75.00, de clientes cujo nome começa com 'A' ou
+# termina com 'Silva', e com id par. O filtro de nome usa o nome tratado, e a
+# saída exibe o nome original. dq_duplicated_id indica pedidos cujo id é
+# compartilhado com outro pedido; _record_hash é usado na conferência de duplicação.
+SQL_COMPOSITE_FILTERS = f"""
+    SELECT
+        p.id              AS order_id,
+        c.name            AS client_name,
+        p.value           AS value,
+        p.dq_duplicated_id,
+        p._record_hash
+    FROM pedidos_tratados AS p
+    INNER JOIN clientes AS c
+        ON c.id = p.client_id
+    WHERE {VALID_AMOUNT_SQL}
+      AND p.value > 75.00
+      AND {NAME_FILTER_SQL}
+      AND p.id % 2 = 0
+    ORDER BY value DESC, order_id ASC, client_name ASC
+"""
+
+# Conferências da Seção 2.3 sobre o cadastro de clientes: mostram, a cada execução,
+# quantos nomes foram tratados, quantos só são encontrados por causa do tratamento
+# e quantos clientes atendem às duas
+# condições do filtro (casos que o OR não pode duplicar).
+SQL_COMPOSITE_FILTERS_NAME_CHECKS = f"""
+    SELECT
+        SUM(CASE WHEN c.dq_name_treated THEN 1 ELSE 0 END)
+            AS names_treated,
+        SUM(CASE WHEN c.name <> TRIM(c.name) THEN 1 ELSE 0 END)
+            AS names_with_edge_spaces,
+        SUM(CASE WHEN (c.name LIKE 'A%' OR c.name LIKE '%Silva') <> {NAME_FILTER_SQL}
+                 THEN 1 ELSE 0 END)
+            AS names_found_only_after_treatment,
+        SUM(CASE WHEN c.name_treated LIKE 'A%' AND c.name_treated LIKE '%SILVA'
+                 THEN 1 ELSE 0 END)
+            AS clients_matching_both_conditions
+    FROM clientes AS c
+"""
+
+# Conferência da Seção 2.3 sobre os pedidos: quantos atenderiam aos critérios,
+# mas ficaram fora por ultrapassar o limite de valor da regra de composição.
+SQL_COMPOSITE_FILTERS_ABOVE_LIMIT_CHECK = f"""
+    SELECT COUNT(*) AS orders_excluded_above_limit
+    FROM pedidos_tratados AS p
+    INNER JOIN clientes AS c
+        ON c.id = p.client_id
+    WHERE p.value > {VALUE_MAX_INCLUSIVE}
+      AND {NAME_FILTER_SQL}
+      AND p.id % 2 = 0
+"""
+
+
 def main() -> None:
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("ERROR")
@@ -397,6 +524,36 @@ def main() -> None:
         .orderBy("value_category", "dq_invalid_range")
         .show(truncate=False)
     )
+
+    register_sql_views(clients_df, orders_quality_df)
+
+    print("=" * 80)
+    print("SEÇÃO 2.1 - CLIENTES COM MAIS DE 50 PEDIDOS (SQL)")
+    print("=" * 80)
+    clients_over_50_df = spark.sql(SQL_CLIENTS_OVER_50_ORDERS)
+    clients_over_50_df.show(20, truncate=False)
+    print(f"Total de clientes com mais de 50 pedidos: {clients_over_50_df.count()}")
+
+    print("=" * 80)
+    print("SEÇÃO 2.2 - TOP 10 CLIENTES POR VALOR TOTAL (SQL)")
+    print("=" * 80)
+    spark.sql(SQL_TOP_10_CLIENTS_BY_VALUE).show(truncate=False)
+
+    print("=" * 80)
+    print("SEÇÃO 2.3 - FILTROS COMPOSTOS (SQL)")
+    print("=" * 80)
+    composite_filters_df = spark.sql(SQL_COMPOSITE_FILTERS)
+    composite_filters_df.drop("_record_hash").show(20, truncate=False)
+    total_filtered = composite_filters_df.count()
+    print(f"Total de pedidos que atendem aos critérios: {total_filtered}")
+
+    print("Conferências da Seção 2.3:")
+    spark.sql(SQL_COMPOSITE_FILTERS_NAME_CHECKS).show(vertical=True)
+    spark.sql(SQL_COMPOSITE_FILTERS_ABOVE_LIMIT_CHECK).show()
+    # Cada linha do resultado deve ser um registro distinto da origem: se o join ou
+    # o OR duplicassem pedidos, haveria menos hashes distintos do que linhas.
+    distinct_filtered = composite_filters_df.select("_record_hash").distinct().count()
+    print(f"Registros distintos no resultado: {distinct_filtered} de {total_filtered} linhas")
 
     spark.stop()
 
