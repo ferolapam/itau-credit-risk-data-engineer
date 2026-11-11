@@ -29,6 +29,13 @@ MONEY_TYPE = DecimalType(10, 2)
 VALUE_MIN_EXCLUSIVE = Decimal("0")
 VALUE_MAX_INCLUSIVE = Decimal("99.99")
 
+# Formato exigido pela Seção 1.2 para o total de compras por cliente.
+TOTAL_VALUE_TYPE = DecimalType(11, 2)
+
+# Fator da regra de Tukey (Q3 + fator x IQR) para sinalizar clientes com volume de
+# pedidos fora do padrão. O fator 3 identifica apenas valores extremos ("far out").
+OUTLIER_IQR_FACTOR = 3
+
 # Flags de qualidade de dados aplicadas a cada pedido.
 DQ_COLUMNS = [
     "dq_missing_id",
@@ -226,6 +233,60 @@ def build_order_issues(orders_quality_df: DataFrame) -> DataFrame:
     )
 
 
+def build_client_report(orders_quality_df: DataFrame) -> tuple[DataFrame, float]:
+    """
+    Seção 1.2: relatório de compras por cliente.
+
+    Colunas exigidas pelo enunciado:
+    - total_orders / total_value: pedidos cujo valor é numérico e não ultrapassa 99.99.
+      Valores negativos são mantidos na soma (podem representar estornos ou devoluções)
+      e continuam sinalizados como problema de qualidade na Seção 1.1.
+
+    Colunas adicionais, para que nenhum pedido deixe de ser visível no relatório:
+    - total_orders_raw: todos os pedidos do cliente, sem qualquer filtro;
+    - orders_with_issues: pedidos do cliente com ao menos uma flag de qualidade;
+    - dq_volume_outlier: cliente com volume de pedidos fora do padrão estatístico.
+
+    Retorna o relatório e o limite de volume usado para a sinalização.
+    """
+    # Pedido considerado no total: valor numérico e dentro do limite superior.
+    in_total = F.col("value").isNotNull() & (F.col("value") <= VALUE_MAX_INCLUSIVE)
+
+    per_client_df = (
+        orders_quality_df
+        # Pedidos de clientes inexistentes não têm a quem ser atribuídos no relatório
+        # e já estão reportados na Seção 1.1 (invalid_client).
+        .filter(~F.col("dq_client_not_found"))
+        # Agrupa por client_id (e não por nome): há nomes iguais em clientes diferentes.
+        .groupBy("client_id", "client_name")
+        .agg(
+            F.count(F.when(in_total, True)).alias("total_orders"),
+            F.sum(F.when(in_total, F.col("value"))).cast(TOTAL_VALUE_TYPE).alias("total_value"),
+            F.count(F.lit(1)).alias("total_orders_raw"),
+            F.count(F.when(~F.col("is_valid"), True)).alias("orders_with_issues"),
+        )
+        # Regra do enunciado: apenas clientes com pelo menos 1 pedido.
+        .filter(F.col("total_orders") >= 1)
+    )
+
+    # Limite estatístico de volume (regra de Tukey), calculado a partir dos próprios
+    # dados, sem valores fixados manualmente. relativeError=0 gera quartis exatos.
+    q1, q3 = per_client_df.approxQuantile("total_orders_raw", [0.25, 0.75], 0)
+    volume_threshold = q3 + OUTLIER_IQR_FACTOR * (q3 - q1)
+
+    report_df = (
+        per_client_df
+        .withColumn("dq_volume_outlier", F.col("total_orders_raw") > volume_threshold)
+        # Desempate por client_id para que o top 20 seja sempre o mesmo.
+        .orderBy(F.desc("total_value"), F.asc("client_id"))
+        .select(
+            "client_id", "client_name", "total_orders", "total_value",
+            "total_orders_raw", "orders_with_issues", "dq_volume_outlier",
+        )
+    )
+    return report_df, volume_threshold
+
+
 def main() -> None:
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("ERROR")
@@ -269,6 +330,13 @@ def main() -> None:
         .orderBy("id", "client_id")
         .show(7, truncate=False)
     )
+
+    print("=" * 80)
+    print("SEÇÃO 1.2 - RELATÓRIO DE COMPRAS POR CLIENTE (TOP 20)")
+    print("=" * 80)
+    client_report_df, volume_threshold = build_client_report(orders_quality_df)
+    print(f"Limite de volume de pedidos por cliente (Q3 + {OUTLIER_IQR_FACTOR} x IQR): {volume_threshold}")
+    client_report_df.show(20, truncate=False)
 
     spark.stop()
 
