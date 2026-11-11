@@ -19,7 +19,7 @@ Solução em PySpark e Spark SQL para validação de qualidade de dados, agrega�
 
 ## Pré-requisitos
 
-- Python 3.10 ou 3.11
+- Python 3.8 a 3.11 (faixa suportada pelo PySpark 3.5.0)
 - Java 17 (exigido pelo Spark)
 - PySpark 3.5.0
 
@@ -81,6 +81,8 @@ Problemas por tipo (Seção 1.1):
 | `invalid_format` (bônus) | 20 |
 | `invalid_client` | 20 |
 
+Cada saída é exibida no formato pedido pelo enunciado. Nas Seções 1.2, 2.1 e 2.3, ela é seguida de uma **visão de preservação**, com colunas adicionais que mostram os pedidos fora dos totais e as sinalizações de qualidade.
+
 Os resultados foram conferidos contra cálculos independentes em Python.
 
 ## Achados e pontos de atenção
@@ -111,6 +113,20 @@ Cada entrega foi feita em uma branch `feature/*` e integrada por Pull Request, c
 | #4 | Seção 1.3: categoria de valor |
 | #5 | Seção 2: consultas em Spark SQL |
 | #6 | Seções 3 e 4: respostas de Git e Code Review |
+
+## Uso de inteligência artificial
+
+Conforme permitido no enunciado, utilizei o assistente de IA **Claude (Anthropic)** como apoio na implementação do código PySpark e Spark SQL, na análise exploratória dos dados (com foco em identificar possíveis gargalos e riscos de qualidade), na redação das respostas e da documentação, e nos comandos de Git.
+
+Como conduzi o trabalho:
+
+- **Decisões de abordagem**: defini o princípio de não remover nem corrigir registros, mas preservar o dado original, sinalizar os problemas com flags e manter a rastreabilidade até que a causa seja investigada. Esse princípio orientou o tratamento dos ids duplicados, dos valores fora da faixa e do cliente 123456.
+- **Revisão crítica das sugestões da IA**: identifiquei e rejeitei propostas que contrariavam o princípio de preservação, como excluir pedidos inválidos ou o cliente 123456 dos relatórios. Em vez de excluir, propus sinalizar com flags, mantendo o dado original ao lado do dado tratado (por exemplo, `value_raw` e `value`, e a flag `dq_name_treated` ao lado de `name_treated`).
+- **Exigência de evidência no código**: as verificações de qualidade (nomes com acento, espaços, duplicações, valores acima do limite) são executadas pelo próprio código a cada rodada, e não apenas em análises externas.
+- **Hipóteses testadas nos dados**: hipóteses como a de concorrência na geração de ids foram confrontadas com os dados antes de entrar na documentação.
+- **Execução e validação**: executei cada etapa localmente, conferi os resultados contra cálculos independentes, revisei cada Pull Request e corrigi os problemas encontrados na revisão.
+
+Compreendo as escolhas técnicas desta solução e estou à disposição para discuti-las.
 
 ## Avisos conhecidos no Windows
 
