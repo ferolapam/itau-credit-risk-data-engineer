@@ -3,6 +3,10 @@ Case - Engenheiro de Dados Júnior
 Seções 1 e 2: PySpark e Spark SQL
 """
 
+# Permite as anotações de tipo list[...] e tuple[...] no Python 3.8, versão mínima
+# do enunciado (sem esta linha, essa sintaxe só funciona a partir do Python 3.9).
+from __future__ import annotations
+
 import os
 import sys
 from decimal import Decimal
@@ -506,8 +510,13 @@ def main() -> None:
     print("SEÇÃO 1.2 - RELATÓRIO DE COMPRAS POR CLIENTE (TOP 20)")
     print("=" * 80)
     client_report_df, volume_threshold = build_client_report(orders_quality_df)
-    print(f"Limite de volume de pedidos por cliente (Q3 + {OUTLIER_IQR_FACTOR} x IQR): {volume_threshold}")
-    client_report_df.show(20, truncate=False)
+    top_20_clients_df = client_report_df.limit(20)
+    top_20_clients_df.select("client_id", "client_name", "total_orders", "total_value").show(truncate=False)
+
+    # Visão de preservação: mesmos 20 clientes, com as colunas que mostram os pedidos
+    # fora do total e a sinalização de volume atípico.
+    print(f"Visão de preservação (limite de volume, Q3 + {OUTLIER_IQR_FACTOR} x IQR: {volume_threshold}):")
+    top_20_clients_df.show(truncate=False)
 
     print("=" * 80)
     print("SEÇÃO 1.3 - TRANSFORMAÇÃO CONDICIONAL (CATEGORIA DE VALOR)")
@@ -531,8 +540,12 @@ def main() -> None:
     print("SEÇÃO 2.1 - CLIENTES COM MAIS DE 50 PEDIDOS (SQL)")
     print("=" * 80)
     clients_over_50_df = spark.sql(SQL_CLIENTS_OVER_50_ORDERS)
-    clients_over_50_df.show(20, truncate=False)
+    clients_over_50_df.select("client_id", "name", "order_count").show(20, truncate=False)
     print(f"Total de clientes com mais de 50 pedidos: {clients_over_50_df.count()}")
+
+    # Visão de preservação: order_count_raw mostra todos os pedidos de cada cliente.
+    print("Visão de preservação:")
+    clients_over_50_df.show(20, truncate=False)
 
     print("=" * 80)
     print("SEÇÃO 2.2 - TOP 10 CLIENTES POR VALOR TOTAL (SQL)")
@@ -543,9 +556,13 @@ def main() -> None:
     print("SEÇÃO 2.3 - FILTROS COMPOSTOS (SQL)")
     print("=" * 80)
     composite_filters_df = spark.sql(SQL_COMPOSITE_FILTERS)
-    composite_filters_df.drop("_record_hash").show(20, truncate=False)
+    composite_filters_df.select("order_id", "client_name", "value").show(20, truncate=False)
     total_filtered = composite_filters_df.count()
     print(f"Total de pedidos que atendem aos critérios: {total_filtered}")
+
+    # Visão de preservação: dq_duplicated_id indica pedidos cujo id é compartilhado.
+    print("Visão de preservação:")
+    composite_filters_df.drop("_record_hash").show(20, truncate=False)
 
     print("Conferências da Seção 2.3:")
     spark.sql(SQL_COMPOSITE_FILTERS_NAME_CHECKS).show(vertical=True)
