@@ -114,6 +114,8 @@ Cada entrega foi feita em uma branch `feature/*` e integrada por Pull Request, c
 | #5 | Seção 2: consultas em Spark SQL |
 | #6 | Seções 3 e 4: respostas de Git e Code Review |
 
+Os Pull Requests seguintes trataram da documentação final, da conformidade com o enunciado e da declaração de uso de IA.
+
 ## Uso de inteligência artificial
 
 Conforme permitido no enunciado, utilizei o assistente de IA **Claude (Anthropic)** como apoio na implementação do código PySpark e Spark SQL, na análise exploratória dos dados (com foco em identificar possíveis gargalos e riscos de qualidade), na redação das respostas e da documentação, e nos comandos de Git.
